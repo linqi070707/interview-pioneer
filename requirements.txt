@@ -1,8 +1,8 @@
 streamlit
 openai
 pandas
+openpyxl
 pymupdf
-rapidocr_onnxruntime
 plotly
 opencv-python-headless
-openpyxl
+rapidocr_onnxruntime
