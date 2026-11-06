@@ -1,0 +1,7 @@
+streamlit
+openai
+pandas
+openpyxl
+python-dotenv
+pymupdf
+rapidocr_onnxruntime

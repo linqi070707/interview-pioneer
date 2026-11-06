@@ -1,0 +1,7 @@
+deepseek.txt
+.env
+init.py
+.venv/
+__pycache__/
+*.pyc
+*.exe
