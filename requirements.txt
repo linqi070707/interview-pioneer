@@ -4,3 +4,4 @@ pandas
 pymupdf
 rapidocr_onnxruntime
 plotly
+opencv-python-headless
