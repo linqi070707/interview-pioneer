@@ -8,7 +8,7 @@ from openai import OpenAI
 import plotly.graph_objects as go
 from datetime import datetime
 
-APP_VERSION = "v0.5.0"
+APP_VERSION = "v0.5.2"
 
 # 1. 初始化
 api_key = ""
@@ -40,45 +40,22 @@ st.markdown("""
     .stApp { background-color: var(--bg-body) !important; color: var(--text-primary) !important; font-family: system-ui, sans-serif; }
     h1, h2, h3, h4 { color: var(--text-primary) !important; font-weight: 700 !important; }
     
-    div[data-baseweb="input"], div[data-baseweb="textarea"] {
-        border-radius: 12px !important; background-color: #fafcff !important;
-    }
-
-    [data-testid="stFileUploader"] section {
-        border: 1.5px dashed var(--border-input) !important;
-        background-color: #ffffff !important; border-radius: 12px !important;
-    }
-
-    [data-testid="stChatInput"] {
-        border: 1.5px solid var(--border-input) !important; border-radius: 12px !important;
-        background-color: #ffffff !important;
-    }
+    div[data-baseweb="input"], div[data-baseweb="textarea"] { border-radius: 12px !important; background-color: #fafcff !important; }
+    [data-testid="stFileUploader"] section { border: 1.5px dashed var(--border-input) !important; background-color: #ffffff !important; border-radius: 12px !important; }
+    [data-testid="stChatInput"] { border: 1.5px solid var(--border-input) !important; border-radius: 12px !important; background-color: #ffffff !important; }
 
     .stButton > button, .stFormSubmitButton > button, .stDownloadButton > button {
         background: #ffffff !important; color: var(--text-primary) !important;
-        border: 1.5px solid var(--border-input) !important; border-radius: 12px !important;
-        font-weight: 600 !important;
+        border: 1.5px solid var(--border-input) !important; border-radius: 12px !important; font-weight: 600 !important;
     }
-    .stButton > button[kind="primary"], .stFormSubmitButton > button[kind="primary"] {
-        background: var(--accent) !important; color: #ffffff !important; border: none !important;
-    }
+    .stButton > button[kind="primary"], .stFormSubmitButton > button[kind="primary"] { background: var(--accent) !important; color: #ffffff !important; border: none !important; }
 
-    .stChatMessage {
-        background-color: var(--bg-card) !important; border: 1px solid var(--border-input) !important;
-        border-radius: 12px !important; padding: 16px !important; margin-bottom: 12px !important;
-    }
+    .stChatMessage { background-color: var(--bg-card) !important; border: 1px solid var(--border-input) !important; border-radius: 12px !important; padding: 16px !important; margin-bottom: 12px !important; }
     .stChatMessage p { font-size: 16px !important; line-height: 1.6 !important; }
     .version-tag { position: fixed; bottom: 10px; right: 15px; color: #888; font-size: 12px; }
 
-    .report-card {
-        background: #ffffff; border: 1px solid var(--border-input);
-        border-radius: 12px; padding: 24px; margin-bottom: 16px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.02);
-    }
-    .report-card-title {
-        font-size: 18px; font-weight: 700; margin-bottom: 12px;
-        display: flex; align-items: center; gap: 8px;
-    }
+    .report-card { background: #ffffff; border: 1px solid var(--border-input); border-radius: 12px; padding: 24px; margin-bottom: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.02); }
+    .report-card-title { font-size: 18px; font-weight: 700; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -110,16 +87,26 @@ if st.session_state.stage == 'input':
     col1, col2 = st.columns([1, 1])
 
     with col1:
-        with st.form("upload_form"):
-            role_list = df['岗位'].unique().tolist()
-            role_list.append("其他（自定义输入）")
-            target_role_input = st.selectbox("请选择目标岗位", role_list)
-            
-            custom_role = ""
-            if target_role_input == "其他（自定义输入）":
-                custom_role = st.text_input("请输入你的目标岗位（如：法务、建筑设计师）")
-                st.warning("⚠️ 提示：自定义岗位缺乏专属知识库，专业深度可能不及预设岗位。")
+        # 【新增】独立的岗位检索与选择区域（放在 form 外，保证搜索时文件不丢失）
+        st.write("**🎯 岗位检索与选择**")
+        search_keyword = st.text_input("输入关键词快速过滤（如：产品、运营）", "", placeholder="输入后自动过滤下方岗位...")
+        
+        role_list = df['岗位'].unique().tolist()
+        if search_keyword:
+            role_list = [r for r in role_list if search_keyword in r]
+        
+        role_list.append("其他（自定义输入）")
+        target_role_input = st.selectbox("请选择目标岗位", role_list)
+        
+        custom_role = ""
+        if target_role_input == "其他（自定义输入）":
+            custom_role = st.text_input("请输入你的目标岗位（如：法务、建筑设计师）")
+            st.warning("⚠️ 提示：自定义岗位缺乏专属知识库，专业深度可能不及预设岗位。")
 
+        st.divider()
+
+        # 表单区域
+        with st.form("upload_form"):
             uploaded_file = st.file_uploader("上传简历 (支持文本型/图片型 PDF)", type=["pdf"])
             manual_text = st.text_area("或者直接粘贴简历文本", height=150)
             submit_btn = st.form_submit_button("🚀 开始诊断并生成题单", type="primary", use_container_width=True)
@@ -247,7 +234,7 @@ if st.session_state.stage == 'input':
 # 阶段二：模拟面试
 # ==========================================
 elif st.session_state.stage == 'interview':
-    st.subheader(f"🎙️ 模拟面试中 | 岗位：{st.session_state.target_role} | 严厉度：{st.session_state.strictness}/10")
+    st.caption(f"🎙️ 模拟面试中 | 岗位：{st.session_state.target_role} | 严厉度：{st.session_state.strictness}/10")
     
     for msg in st.session_state.messages:
         if msg["role"] != "system":
@@ -346,7 +333,6 @@ elif st.session_state.stage == 'report':
 
         st.divider()
 
-        # 【核心修复】将文本中的换行符替换为 <br>，防止 HTML 被截断
         def clean_text(text):
             return str(text).replace('\n', '<br>').replace('\r', '')
 
