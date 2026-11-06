@@ -1,7 +1,6 @@
 streamlit
 openai
 pandas
-openpyxl
 pymupdf
 rapidocr_onnxruntime
 plotly
