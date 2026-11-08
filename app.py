@@ -11,7 +11,7 @@ from datetime import datetime
 import re
 import base64
 
-APP_VERSION = "v1.0.0"
+APP_VERSION = "v1.0.2"
 
 # 1. 初始化
 api_key = ""
@@ -74,17 +74,15 @@ st.markdown("""
 
 st.title("🎙️ 面试先锋")
 
-# 【核心修复】极其强力的 JSON 解析器
+# 极其强力的 JSON 解析器
 def robust_json_parse(text):
     text = text.strip()
-    # 去除 Markdown 格式
     if text.startswith("```json"):
         text = text[7:]
     if text.endswith("```"):
         text = text[:-3]
     text = text.strip()
     
-    # 截取首尾大括号
     start_idx = text.find('{')
     end_idx = text.rfind('}')
     if start_idx != -1 and end_idx != -1:
@@ -93,14 +91,11 @@ def robust_json_parse(text):
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        # 暴力修复1：转义内部未转义的换行符
         text_fixed = re.sub(r'(?<!\\)\n', '\\\\n', text)
         try:
             return json.loads(text_fixed)
         except:
             pass
-        
-        # 暴力修复2：如果确实坏得彻底，用 eval 兜底（本地环境够用）
         try:
             return eval(text)
         except Exception as e:
@@ -170,6 +165,18 @@ if st.session_state.stage == 'input':
             manual_text = st.text_area("或者直接粘贴简历文本", height=150)
             submit_btn = st.form_submit_button("🚀 开始诊断并生成题单", type="primary", use_container_width=True)
 
+        # 【核心修复】将下载按钮移出 form 表单
+        if os.path.exists("demo_resume.pdf"):
+            with open("demo_resume.pdf", "rb") as pdf_file:
+                demo_pdf_bytes = pdf_file.read()
+            st.download_button(
+                label="📥 没有现成简历？点击下载测试用示例 PDF",
+                data=demo_pdf_bytes,
+                file_name="示例简历_产品经理.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
+
         if submit_btn:
             final_role = custom_role.strip() if target_role_input == "其他（自定义输入）" else target_role_input
             if not final_role:
@@ -223,8 +230,6 @@ if st.session_state.stage == 'input':
                                 response_format={"type": "json_object"}, temperature=0.1
                             )
                             raw_content = response.choices[0].message.content
-                            
-                            # 调用强力解析器
                             parsed_json = robust_json_parse(raw_content)
                             
                             st.session_state.analysis_result = parsed_json
