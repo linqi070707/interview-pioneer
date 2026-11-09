@@ -6,3 +6,4 @@ pymupdf
 plotly
 opencv-python-headless
 rapidocr_onnxruntime
+edge-tts

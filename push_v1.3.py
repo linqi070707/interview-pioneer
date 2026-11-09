@@ -1,11 +1,11 @@
 import subprocess
 
-print("🚀 正在推送 v1.0.3 到 GitHub...")
+print("🚀 正在推送 v1.3.1 到 GitHub...")
 
 try:
     subprocess.run(["git", "add", "."], check=True)
     try:
-        subprocess.run(["git", "commit", "-m", "Release v1.0.3: 优化云端视频加载性能，改用 st.video 流式加载"], check=True)
+        subprocess.run(["git", "commit", "-m", "Release v1.3.1: 增加语音交互，历史存档，极速云端加载"], check=True)
         print("✅ 本地提交成功。")
     except subprocess.CalledProcessError:
         print("✅ 本地没有新的修改需要提交。")

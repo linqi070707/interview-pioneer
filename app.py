@@ -10,21 +10,30 @@ import plotly.graph_objects as go
 from datetime import datetime
 import re
 import base64
+import asyncio
+import edge_tts
 
-APP_VERSION = "v1.0.3"
+APP_VERSION = "v1.3.1"
 
 # 1. 初始化
 api_key = ""
+siliconflow_key = ""
+
 if os.path.exists("deepseek.txt"):
     with open("deepseek.txt", "r", encoding="utf-8") as f:
-        api_key = f.read().strip()
+        lines = [line.strip() for line in f.readlines() if line.strip()]
+        if len(lines) >= 1: api_key = lines[0]
+        if len(lines) >= 2: siliconflow_key = lines[1]
 elif "DEEPSEEK_API_KEY" in st.secrets:
     api_key = st.secrets["DEEPSEEK_API_KEY"]
-else:
-    st.error("未找到 API Key")
+    siliconflow_key = st.secrets.get("SILICONFLOW_API_KEY", "")
+
+if not api_key:
+    st.error("未找到 DeepSeek API Key")
     st.stop()
 
 client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+asr_client = OpenAI(api_key=siliconflow_key, base_url="https://api.siliconflow.cn/v1") if siliconflow_key else None
 
 st.set_page_config(page_title="面试先锋", page_icon="🎙️", layout="wide")
 
@@ -69,42 +78,50 @@ st.markdown("""
 
     .report-card { background: #ffffff; border: 1px solid var(--border-input); border-radius: 12px; padding: 24px; margin-bottom: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.02); }
     .report-card-title { font-size: 18px; font-weight: 700; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
-
-    /* 【新增】隐藏 Streamlit 原生 st.video 的控件 */
+    
     video::-webkit-media-controls { display: none !important; }
-    video::-webkit-media-controls-enclosure { display: none !important; }
-    video::-webkit-media-controls-panel { display: none !important; }
+    [data-testid="stAudioInput"] { margin-top: -15px; margin-bottom: 20px; }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("🎙️ 面试先锋")
 
-# 极其强力的 JSON 解析器
 def robust_json_parse(text):
     text = text.strip()
-    if text.startswith("```json"):
-        text = text[7:]
-    if text.endswith("```"):
-        text = text[:-3]
+    if text.startswith("```json"): text = text[7:]
+    if text.endswith("```"): text = text[:-3]
     text = text.strip()
-    
     start_idx = text.find('{')
     end_idx = text.rfind('}')
-    if start_idx != -1 and end_idx != -1:
-        text = text[start_idx:end_idx+1]
-        
+    if start_idx != -1 and end_idx != -1: text = text[start_idx:end_idx+1]
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         text_fixed = re.sub(r'(?<!\\)\n', '\\\\n', text)
-        try:
-            return json.loads(text_fixed)
-        except:
-            pass
-        try:
-            return eval(text)
-        except Exception as e:
-            raise ValueError(f"JSON 彻底损坏无法解析: {e}")
+        try: return json.loads(text_fixed)
+        except: pass
+        try: return eval(text)
+        except Exception as e: raise ValueError(f"JSON 解析失败: {e}")
+
+async def generate_audio(text, filename):
+    voice = "zh-CN-XiaoxiaoNeural" 
+    communicate = edge_tts.Communicate(text, voice)
+    await communicate.save(filename)
+
+def transcribe_audio(audio_bytes):
+    if not asr_client:
+        return ""
+    try:
+        with open("temp_user_audio.wav", "wb") as f:
+            f.write(audio_bytes)
+        with open("temp_user_audio.wav", "rb") as f:
+            response = asr_client.audio.transcriptions.create(
+                model="FunAudioLLM/SenseVoiceSmall",
+                file=f
+            )
+        return response.text
+    except Exception as e:
+        return ""
 
 @st.cache_resource
 def load_ocr(): return RapidOCR()
@@ -124,6 +141,8 @@ if 'question_list' not in st.session_state: st.session_state.question_list = []
 if 'strictness' not in st.session_state: st.session_state.strictness = 3
 if 'report_data' not in st.session_state: st.session_state.report_data = None
 if 'current_emotion' not in st.session_state: st.session_state.current_emotion = "neutral"
+if 'last_audio' not in st.session_state: st.session_state.last_audio = None
+if 'last_audio_processed' not in st.session_state: st.session_state.last_audio_processed = None
 
 # ==========================================
 # 阶段一：简历上传与诊断
@@ -131,8 +150,26 @@ if 'current_emotion' not in st.session_state: st.session_state.current_emotion =
 if st.session_state.stage == 'input':
     st.subheader("第一步：简历诊断与人岗匹配")
     col1, col2 = st.columns([1, 1])
-
     with col1:
+        with st.expander("📂 读取历史存档（断点续传）", expanded=False):
+            uploaded_history = st.file_uploader("上传之前导出的 .json 存档文件", type=["json"])
+            if uploaded_history is not None:
+                try:
+                    history_data = json.loads(uploaded_history.read().decode("utf-8"))
+                    st.session_state.messages = history_data.get("messages", [])
+                    st.session_state.analysis_result = history_data.get("analysis_result", {})
+                    st.session_state.resume_text = history_data.get("resume_text", "")
+                    st.session_state.target_role = history_data.get("target_role", "")
+                    st.session_state.question_list = history_data.get("question_list", [])
+                    st.session_state.strictness = history_data.get("strictness", 3)
+                    st.session_state.current_emotion = history_data.get("current_emotion", "neutral")
+                    st.session_state.last_audio = None
+                    st.session_state.stage = 'interview'
+                    st.success("✅ 存档读取成功，正在恢复现场...")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"存档解析失败：{e}")
+
         st.write("**🎯 岗位检索与选择**")
         search_keyword = st.text_input("输入关键词快速过滤（如：产品、运营）", "", placeholder="输入后自动过滤下方岗位...")
         role_list = df['岗位'].unique().tolist()
@@ -153,13 +190,7 @@ if st.session_state.stage == 'input':
         if os.path.exists("demo_resume.pdf"):
             with open("demo_resume.pdf", "rb") as pdf_file:
                 demo_pdf_bytes = pdf_file.read()
-            st.download_button(
-                label="📥 没有现成简历？点击下载测试用示例 PDF",
-                data=demo_pdf_bytes,
-                file_name="示例简历_产品经理.pdf",
-                mime="application/pdf",
-                use_container_width=True
-            )
+            st.download_button(label="📥 没有现成简历？点击下载测试用示例 PDF", data=demo_pdf_bytes, file_name="示例简历_产品经理.pdf", mime="application/pdf", use_container_width=True)
 
         if submit_btn:
             final_role = custom_role.strip() if target_role_input == "其他（自定义输入）" else target_role_input
@@ -176,7 +207,6 @@ if st.session_state.stage == 'input':
                         doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
                         extracted_text = ""
                         for page in doc: extracted_text += page.get_text()
-                        
                         if len(extracted_text.strip()) < 50:
                             with st.spinner("检测到图片型 PDF，启动 OCR... (预计 5 - 15 秒)"):
                                 ocr_text = ""
@@ -189,7 +219,6 @@ if st.session_state.stage == 'input':
                             st.markdown("<div style='color:#31a24c;font-size:14px;margin-bottom:10px;'>✅ OCR 识别成功</div>", unsafe_allow_html=True)
                         else:
                             st.markdown("<div style='color:#31a24c;font-size:14px;margin-bottom:10px;'>✅ 简历文本提取成功</div>", unsafe_allow_html=True)
-                            
                         resume_text = extracted_text
                     except Exception as e:
                         st.error(f"PDF 解析出错：{e}")
@@ -215,7 +244,6 @@ if st.session_state.stage == 'input':
                             )
                             raw_content = response.choices[0].message.content
                             parsed_json = robust_json_parse(raw_content)
-                            
                             st.session_state.analysis_result = parsed_json
                             st.session_state.resume_text = resume_text
                             st.session_state.target_role = final_role
@@ -235,7 +263,6 @@ if st.session_state.stage == 'input':
             res = st.session_state.analysis_result
             match_data = res.get('match_analysis', {})
             profile_data = res.get('profile', {})
-            
             st.markdown(f"""
             <div style="margin-top: -60px;">
                 <div style="font-size: 16px; color: #8b9cb0; margin-bottom: 4px;">与【{st.session_state.target_role}】的匹配度得分</div>
@@ -244,12 +271,10 @@ if st.session_state.stage == 'input':
                 </div>
             </div>
             """, unsafe_allow_html=True)
-            
             with st.expander("👤 求职能力画像", expanded=True):
                 st.markdown(f"<div style='color: #2d7ff9; font-weight: 700; font-size: 16px; margin-bottom: 4px;'>核心技能：</div>\n{profile_data.get('核心技能', '')}", unsafe_allow_html=True)
                 st.markdown("<div style='margin-bottom: 12px;'></div>", unsafe_allow_html=True)
                 st.markdown(f"<div style='color: #31a24c; font-weight: 700; font-size: 16px; margin-bottom: 4px;'>优势：</div>\n{profile_data.get('优势', '')}", unsafe_allow_html=True)
-                
             with st.expander("🎯 人岗匹配分析 **（点击展开）**", expanded=False):
                 st.success(f"**优势亮点**：\n{match_data.get('优势亮点', '')}")
                 st.error(f"**欠缺能力**：\n{match_data.get('欠缺能力', '')}")
@@ -257,7 +282,6 @@ if st.session_state.stage == 'input':
             st.divider()
             st.write("🎛️ **面试官严厉度调节**")
             strictness_input = st.slider("3 = 温和型 HR（推荐） | 7 = 严厉型主管（推荐）", 0, 10, st.session_state.strictness)
-            
             if strictness_input <= 3: st.info("当前模式：温和型 HR")
             elif strictness_input <= 7: st.warning("当前模式：严厉型主管")
             else: st.error("当前模式：地狱压力面")
@@ -279,13 +303,9 @@ if st.session_state.stage == 'input':
 状态只能是：neutral（平静提问）, thinking（质疑审视）, satisfied（满意赞许）, guiding（鼓励引导）。
 例如：`[Emotion: thinking] 嗯，那你这个数据是怎么算出来的？`
     """
-
-                if strictness_input <= 3: 
-                    control_prompt = base_control + "\n【温和设定】：语气友善。如果候选人回答较浅，不要过度深挖，直接给个台阶进入下一题。"
-                elif strictness_input <= 7: 
-                    control_prompt = base_control + "\n【严厉设定】：针对逻辑漏洞最多追问2次。候选人承认不足后，立刻切题。"
-                else: 
-                    control_prompt = base_control + "\n【压力设定】：连续深挖逻辑死角，最多追问3次。然后强制切题。"
+                if strictness_input <= 3: control_prompt = base_control + "\n【温和设定】：语气友善。如果候选人回答较浅，不要过度深挖，直接给个台阶进入下一题。"
+                elif strictness_input <= 7: control_prompt = base_control + "\n【严厉设定】：针对逻辑漏洞最多追问2次。候选人承认不足后，立刻切题。"
+                else: control_prompt = base_control + "\n【压力设定】：连续深挖逻辑死角，最多追问3次。然后强制切题。"
 
                 questions_context = "\n".join([f"第{i+1}题: {q}" for i, q in enumerate(st.session_state.question_list)])
                 system_content = f"""{control_prompt}
@@ -297,20 +317,28 @@ if st.session_state.stage == 'input':
                 
                 请用简短的一句话开场，并直接抛出题库中的第一题（当前提问：{first_q}）。"""
 
+                first_reply_text = f"你好，我是今天的面试官。我们开始吧。\n\n第一题：{first_q}"
                 st.session_state.messages = [
                     {"role": "system", "content": system_content},
-                    {"role": "assistant", "content": f"[Emotion: neutral] 你好，我是今天的面试官。我们开始吧。\n\n**第一题：** {first_q}"}
+                    {"role": "assistant", "content": f"[Emotion: neutral] {first_reply_text}"}
                 ]
+                try:
+                    tts_text = first_reply_text.replace("**", "").replace("\n", " ").replace("*", "")
+                    audio_file = "temp_voice.mp3"
+                    asyncio.run(generate_audio(tts_text, audio_file))
+                    with open(audio_file, "rb") as f:
+                        st.session_state.last_audio = base64.b64encode(f.read()).decode("utf-8")
+                except Exception:
+                    st.session_state.last_audio = None
                 st.rerun()
 
 # ==========================================
-# 阶段二：模拟面试（云端性能优化版）
+# 阶段二：模拟面试
 # ==========================================
 elif st.session_state.stage == 'interview':
     col_avatar, col_chat = st.columns([1, 2.5])
     
     with col_avatar:
-        # 【核心修复】使用 Streamlit 原生的 st.video 直接读取本地文件，不经过 base64，速度极大提升！
         video_path = f"assets/{st.session_state.current_emotion}.mp4"
         if os.path.exists(video_path):
             st.video(video_path, autoplay=True, loop=True, muted=True)
@@ -318,17 +346,43 @@ elif st.session_state.stage == 'interview':
             st.error("视频文件缺失")
         
         st.caption(f"岗位：{st.session_state.target_role} | 严厉度：{st.session_state.strictness}/10")
+        st.write("")
+        progress_data = {
+            "messages": st.session_state.messages,
+            "analysis_result": st.session_state.analysis_result,
+            "resume_text": st.session_state.resume_text,
+            "target_role": st.session_state.target_role,
+            "question_list": st.session_state.question_list,
+            "strictness": st.session_state.strictness,
+            "current_emotion": st.session_state.current_emotion
+        }
+        st.download_button(label="💾 保存当前面试进度 (JSON存档)", data=json.dumps(progress_data, ensure_ascii=False, indent=2), file_name=f"面试存档_{st.session_state.target_role}_{datetime.now().strftime('%m%d_%H%M')}.json", mime="application/json", use_container_width=True)
 
     with col_chat:
+        if st.session_state.last_audio:
+            audio_html = f"""
+                <audio autoplay>
+                    <source src="data:audio/mp3;base64,{st.session_state.last_audio}" type="audio/mp3">
+                </audio>
+                <script>
+                    var aud = document.getElementsByTagName("audio")[0];
+                    aud.play().catch(e => console.log("浏览器拦截了自动播放"));
+                </script>
+            """
+            components.html(audio_html, height=0)
+
         for msg in st.session_state.messages:
             if msg["role"] != "system":
                 display_content = re.sub(r'\[Emotion:\s*\w+\]\s*', '', msg["content"], flags=re.IGNORECASE)
                 with st.chat_message(msg["role"], avatar="🧑‍💼" if msg["role"] == "assistant" else "🧑‍🎓"):
                     st.markdown(display_content)
 
-        if user_input := st.chat_input("请输入你的回答..."):
-            with st.chat_message("user", avatar="🧑‍🎓"): st.markdown(user_input)
-            st.session_state.messages.append({"role": "user", "content": user_input})
+        def process_user_input(text_input, is_voice=False):
+            display_text = "🎙️ [语音消息]" if is_voice else text_input
+            
+            with st.chat_message("user", avatar="🧑‍🎓"): 
+                st.markdown(display_text)
+            st.session_state.messages.append({"role": "user", "content": text_input})
 
             with st.chat_message("assistant", avatar="🧑‍💼"):
                 with st.spinner("面试官正在思考... (预计 3 - 5 秒)"):
@@ -347,8 +401,40 @@ elif st.session_state.stage == 'interview':
                     display_reply = display_reply.replace("[emotion: thinking]", "").replace("[emotion: satisfied]", "").replace("[emotion: guiding]", "").replace("[emotion: neutral]", "")
                     st.markdown(display_reply)
                     
+                    try:
+                        tts_text = display_reply.replace("**", "").replace("\n", " ").replace("*", "")
+                        audio_file = "temp_voice.mp3"
+                        asyncio.run(generate_audio(tts_text, audio_file))
+                        with open(audio_file, "rb") as f:
+                            st.session_state.last_audio = base64.b64encode(f.read()).decode("utf-8")
+                    except Exception:
+                        st.session_state.last_audio = None
+                    
             st.session_state.messages.append({"role": "assistant", "content": raw_reply})
             st.rerun()
+
+        if asr_client:
+            st.write("🎙️ **语音输入（点击麦克风录音）**")
+            audio_value = st.audio_input("Record a voice message", label_visibility="collapsed")
+            
+            if audio_value is not None:
+                audio_hash = hash(audio_value.getvalue())
+                if st.session_state.last_audio_processed != audio_hash:
+                    st.session_state.last_audio_processed = audio_hash
+                    with st.spinner("正在识别语音..."):
+                        user_text = transcribe_audio(audio_value.getvalue())
+                        clean_text = re.sub(r'[^\w\u4e00-\u9fa5]', '', user_text)
+                        if len(clean_text) >= 2:
+                            process_user_input(user_text, is_voice=True)
+                        else:
+                            st.warning("⚠️ 没听清，可能是麦克风兼容问题或环境嘈杂，请重试或使用下方文本输入。")
+        else:
+            st.info("💡 想要体验语音对话？请在 deepseek.txt 第二行填入 SiliconFlow API Key。")
+
+        st.write("---")
+        st.write("⌨️ **或 文本输入**")
+        if user_input := st.chat_input("请输入你的回答..."):
+            process_user_input(user_input, is_voice=False)
 
         st.divider()
         col_a, col_b = st.columns([1, 1])
@@ -360,6 +446,7 @@ elif st.session_state.stage == 'interview':
             if st.button("🔄 放弃面试，返回首页", use_container_width=True):
                 st.session_state.stage = 'input'
                 st.session_state.messages = []
+                st.session_state.last_audio = None
                 st.rerun()
 
 # ==========================================
@@ -367,7 +454,6 @@ elif st.session_state.stage == 'interview':
 # ==========================================
 elif st.session_state.stage == 'report':
     st.subheader("📊 面试复盘与进阶报告")
-    
     if st.session_state.report_data is None:
         with st.spinner("导师 Agent 正在深度分析你的面试表现... (预计 5 - 15 秒)"):
             chat_history = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state.messages if m['role'] != 'system'])
@@ -399,64 +485,35 @@ elif st.session_state.stage == 'report':
     if st.session_state.report_data:
         report_data = st.session_state.report_data
         scores = report_data.get("scores", {})
-        
         col_chart, col_metrics = st.columns([1.2, 1])
-        
         with col_chart:
             categories = list(scores.keys())
             values = list(scores.values())
-            
             fig = go.Figure(data=go.Scatterpolar(
                 r=values + [values[0]], theta=categories + [categories[0]],
                 fill='toself', line_color='#2d7ff9', fillcolor='rgba(45,127,249,0.15)',
                 mode='lines+markers+text', text=values + [values[0]], textposition='top center',
                 textfont=dict(size=13, color='#1e2b3c')
             ))
-            fig.update_layout(
-                polar=dict(radialaxis=dict(visible=True, range=[0, 100], showticklabels=False)),
+            fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100], showticklabels=False)),
                 showlegend=False, margin=dict(l=40, r=40, t=40, b=40), height=320,
-                paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)'
-            )
+                paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
             st.plotly_chart(fig, use_container_width=True)
-
         with col_metrics:
             st.write("### 能力得分")
             for k, v in scores.items():
                 st.metric(label=k, value=f"{v} 分")
-
         st.divider()
-
-        def clean_text(text):
-            return str(text).replace('\n', '<br>').replace('\r', '')
-
+        def clean_text(text): return str(text).replace('\n', '<br>').replace('\r', '')
         st.markdown(f"""
-        <div class="report-card" style="border-left: 4px solid #31a24c;">
-            <div class="report-card-title">🌟 教练赋能评语</div>
-            <div style="color: #1e2b3c; line-height: 1.7; font-size: 15px;">{clean_text(report_data.get('highlights', ''))}</div>
-        </div>
-        <div class="report-card" style="border-left: 4px solid #e53935;">
-            <div class="report-card-title">🛡️ 职场避坑指南</div>
-            <div style="color: #1e2b3c; line-height: 1.7; font-size: 15px;">{clean_text(report_data.get('weaknesses', ''))}</div>
-        </div>
-        <div class="report-card" style="border-left: 4px solid #f59e0b;">
-            <div class="report-card-title">🗣️ 沟通交互反馈</div>
-            <div style="color: #1e2b3c; line-height: 1.7; font-size: 15px;">{clean_text(report_data.get('interaction_feedback', '暂无反馈'))}</div>
-        </div>
-        <div class="report-card" style="border-left: 4px solid #2d7ff9;">
-            <div class="report-card-title">🚀 下一步行动建议</div>
-            <div style="color: #1e2b3c; line-height: 1.7; font-size: 15px;">{clean_text(report_data.get('suggestions', ''))}</div>
-        </div>
+        <div class="report-card" style="border-left: 4px solid #31a24c;"><div class="report-card-title">🌟 教练赋能评语</div><div style="color: #1e2b3c; line-height: 1.7; font-size: 15px;">{clean_text(report_data.get('highlights', ''))}</div></div>
+        <div class="report-card" style="border-left: 4px solid #e53935;"><div class="report-card-title">🛡️ 职场避坑指南</div><div style="color: #1e2b3c; line-height: 1.7; font-size: 15px;">{clean_text(report_data.get('weaknesses', ''))}</div></div>
+        <div class="report-card" style="border-left: 4px solid #f59e0b;"><div class="report-card-title">🗣️ 沟通交互反馈</div><div style="color: #1e2b3c; line-height: 1.7; font-size: 15px;">{clean_text(report_data.get('interaction_feedback', '暂无反馈'))}</div></div>
+        <div class="report-card" style="border-left: 4px solid #2d7ff9;"><div class="report-card-title">🚀 下一步行动建议</div><div style="color: #1e2b3c; line-height: 1.7; font-size: 15px;">{clean_text(report_data.get('suggestions', ''))}</div></div>
         """, unsafe_allow_html=True)
-            
         st.write("") 
-        
         md_content = f"# 面试复盘报告\n\n**教练赋能评语**\n{report_data.get('highlights', '')}\n\n**职场避坑指南**\n{report_data.get('weaknesses', '')}\n\n**沟通交互反馈**\n{report_data.get('interaction_feedback', '')}\n\n**下一步行动建议**\n{report_data.get('suggestions', '')}\n"
-        current_time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        st.download_button(
-            label="📥 下载复盘报告 (Markdown)",
-            data=md_content, file_name=f"面试复盘报告_{current_time_str}.md", mime="text/markdown", type="primary", use_container_width=True
-        )
-
+        st.download_button(label="📥 下载复盘报告 (Markdown)", data=md_content, file_name=f"面试复盘报告_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md", mime="text/markdown", type="primary", use_container_width=True)
     st.divider()
     if st.button("🏠 返回首页，开始新一轮练习", use_container_width=True):
         st.session_state.stage = 'input'
@@ -464,6 +521,7 @@ elif st.session_state.stage == 'report':
         st.session_state.resume_text = ""
         st.session_state.analysis_result = None
         st.session_state.report_data = None
+        st.session_state.last_audio = None
         st.rerun()
 
 st.markdown(f"<div class='version-tag'>面试先锋 {APP_VERSION}</div>", unsafe_allow_html=True)
