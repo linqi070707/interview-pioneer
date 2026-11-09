@@ -13,7 +13,7 @@ import base64
 import asyncio
 import edge_tts
 
-APP_VERSION = "v1.3.1"
+APP_VERSION = "v1.3.2"
 
 # 1. 初始化
 api_key = ""
@@ -38,7 +38,7 @@ asr_client = OpenAI(api_key=siliconflow_key, base_url="https://api.siliconflow.c
 st.set_page_config(page_title="面试先锋", page_icon="🎙️", layout="wide")
 
 # ==========================================
-# 注入 UI 样式
+# 注入 UI 样式 (保持不变)
 # ==========================================
 st.markdown("""
 <style>
@@ -109,8 +109,7 @@ async def generate_audio(text, filename):
     await communicate.save(filename)
 
 def transcribe_audio(audio_bytes):
-    if not asr_client:
-        return ""
+    if not asr_client: return ""
     try:
         with open("temp_user_audio.wav", "wb") as f:
             f.write(audio_bytes)
@@ -119,8 +118,11 @@ def transcribe_audio(audio_bytes):
                 model="FunAudioLLM/SenseVoiceSmall",
                 file=f
             )
+        # 用完即删，释放空间
+        if os.path.exists("temp_user_audio.wav"):
+            os.remove("temp_user_audio.wav")
         return response.text
-    except Exception as e:
+    except Exception:
         return ""
 
 @st.cache_resource
@@ -211,7 +213,8 @@ if st.session_state.stage == 'input':
                             with st.spinner("检测到图片型 PDF，启动 OCR... (预计 5 - 15 秒)"):
                                 ocr_text = ""
                                 for page in doc:
-                                    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                                    # 【核心修复】将 2, 2 降为 1.5, 1.5，大幅提升云端速度
+                                    pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5)) 
                                     result, _ = ocr_engine(pix.tobytes("png"))
                                     if result:
                                         for line in result: ocr_text += line[1] + "\n"
