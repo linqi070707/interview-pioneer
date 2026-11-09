@@ -13,7 +13,7 @@ import base64
 import asyncio
 import edge_tts
 
-APP_VERSION = "v1.3.2"
+APP_VERSION = "v1.3.6"
 
 # 1. 初始化
 api_key = ""
@@ -38,7 +38,7 @@ asr_client = OpenAI(api_key=siliconflow_key, base_url="https://api.siliconflow.c
 st.set_page_config(page_title="面试先锋", page_icon="🎙️", layout="wide")
 
 # ==========================================
-# 注入 UI 样式 (保持不变)
+# 注入 UI 样式 (删除了对录音组件的魔改)
 # ==========================================
 st.markdown("""
 <style>
@@ -80,7 +80,6 @@ st.markdown("""
     .report-card-title { font-size: 18px; font-weight: 700; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
     
     video::-webkit-media-controls { display: none !important; }
-    [data-testid="stAudioInput"] { margin-top: -15px; margin-bottom: 20px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -118,12 +117,37 @@ def transcribe_audio(audio_bytes):
                 model="FunAudioLLM/SenseVoiceSmall",
                 file=f
             )
-        # 用完即删，释放空间
         if os.path.exists("temp_user_audio.wav"):
             os.remove("temp_user_audio.wav")
         return response.text
     except Exception:
         return ""
+
+def parse_image_pdf_with_vision(doc):
+    try:
+        combined_text = ""
+        for page in doc:
+            pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+            img_bytes = pix.tobytes("png")
+            b64_img = base64.b64encode(img_bytes).decode('utf-8')
+            prompt = "请将这张图片中的文字完整提取出来，保持原有的段落结构，不需要任何多余的解释，直接输出文本即可。"
+            response = client.chat.completions.create(
+                model="deepseek-chat", 
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_img}"}},
+                            {"type": "text", "text": prompt}
+                        ]
+                    }
+                ],
+                temperature=0.1
+            )
+            combined_text += response.choices[0].message.content + "\n"
+        return combined_text
+    except Exception as e:
+        return None
 
 @st.cache_resource
 def load_ocr(): return RapidOCR()
@@ -209,17 +233,26 @@ if st.session_state.stage == 'input':
                         doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
                         extracted_text = ""
                         for page in doc: extracted_text += page.get_text()
+                        
                         if len(extracted_text.strip()) < 50:
-                            with st.spinner("检测到图片型 PDF，启动 OCR... (预计 5 - 15 秒)"):
-                                ocr_text = ""
-                                for page in doc:
-                                    # 【核心修复】将 2, 2 降为 1.5, 1.5，大幅提升云端速度
-                                    pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5)) 
-                                    result, _ = ocr_engine(pix.tobytes("png"))
-                                    if result:
-                                        for line in result: ocr_text += line[1] + "\n"
-                                extracted_text = ocr_text
-                            st.markdown("<div style='color:#31a24c;font-size:14px;margin-bottom:10px;'>✅ OCR 识别成功</div>", unsafe_allow_html=True)
+                            with st.spinner("检测到图片型 PDF，启动极速视觉大模型解析... (预计 2-3 秒)"):
+                                vision_text = parse_image_pdf_with_vision(doc)
+                                if vision_text and len(vision_text.strip()) > 20:
+                                    extracted_text = vision_text
+                                    st.markdown("<div style='color:#31a24c;font-size:14px;margin-bottom:10px;'>✅ 视觉大模型解析成功</div>", unsafe_allow_html=True)
+                                else:
+                                    st.warning("视觉解析失败或超时，切换回本地 OCR...")
+                            
+                            if len(extracted_text.strip()) < 50:
+                                with st.spinner("启动本地 OCR 解析... (预计 10-15 秒)"):
+                                    ocr_text = ""
+                                    for page in doc:
+                                        pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5)) 
+                                        result, _ = ocr_engine(pix.tobytes("png"))
+                                        if result:
+                                            for line in result: ocr_text += line[1] + "\n"
+                                    extracted_text = ocr_text
+                                st.markdown("<div style='color:#31a24c;font-size:14px;margin-bottom:10px;'>✅ 本地 OCR 识别成功</div>", unsafe_allow_html=True)
                         else:
                             st.markdown("<div style='color:#31a24c;font-size:14px;margin-bottom:10px;'>✅ 简历文本提取成功</div>", unsafe_allow_html=True)
                         resume_text = extracted_text
@@ -242,7 +275,7 @@ if st.session_state.stage == 'input':
                         """
                         try:
                             response = client.chat.completions.create(
-                                model="deepseek-flash", messages=[{"role": "user", "content": prompt}],
+                                model="deepseek-chat", messages=[{"role": "user", "content": prompt}],
                                 response_format={"type": "json_object"}, temperature=0.1
                             )
                             raw_content = response.choices[0].message.content
@@ -390,7 +423,7 @@ elif st.session_state.stage == 'interview':
             with st.chat_message("assistant", avatar="🧑‍💼"):
                 with st.spinner("面试官正在思考... (预计 3 - 5 秒)"):
                     response = client.chat.completions.create(
-                        model="deepseek-flash", messages=st.session_state.messages, temperature=0.3
+                        model="deepseek-chat", messages=st.session_state.messages, temperature=0.3
                     )
                     raw_reply = response.choices[0].message.content
                     
@@ -416,8 +449,9 @@ elif st.session_state.stage == 'interview':
             st.session_state.messages.append({"role": "assistant", "content": raw_reply})
             st.rerun()
 
+        # 【恢复原生极简样式】
         if asr_client:
-            st.write("🎙️ **语音输入（点击麦克风录音）**")
+            st.caption("🎙️ **语音输入（点击左侧麦克风图标开始录音，再次点击结束）**")
             audio_value = st.audio_input("Record a voice message", label_visibility="collapsed")
             
             if audio_value is not None:
@@ -430,11 +464,10 @@ elif st.session_state.stage == 'interview':
                         if len(clean_text) >= 2:
                             process_user_input(user_text, is_voice=True)
                         else:
-                            st.warning("⚠️ 没听清，可能是麦克风兼容问题或环境嘈杂，请重试或使用下方文本输入。")
+                            st.warning("⚠️ 没听清，可能是麦克风兼容问题或环境嘈杂，请重试或使用文本输入。")
         else:
             st.info("💡 想要体验语音对话？请在 deepseek.txt 第二行填入 SiliconFlow API Key。")
 
-        st.write("---")
         st.write("⌨️ **或 文本输入**")
         if user_input := st.chat_input("请输入你的回答..."):
             process_user_input(user_input, is_voice=False)
@@ -476,7 +509,7 @@ elif st.session_state.stage == 'report':
             """
             try:
                 response = client.chat.completions.create(
-                    model="deepseek-flash", messages=[{"role": "user", "content": prompt}],
+                    model="deepseek-chat", messages=[{"role": "user", "content": prompt}],
                     response_format={"type": "json_object"}, temperature=0.4
                 )
                 parsed_json = robust_json_parse(response.choices[0].message.content)
