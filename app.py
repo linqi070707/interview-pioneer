@@ -13,7 +13,7 @@ import base64
 import asyncio
 import edge_tts
 
-APP_VERSION = "v1.3.6"
+APP_VERSION = "v1.3.7"
 
 # 1. 初始化
 api_key = ""
@@ -38,7 +38,7 @@ asr_client = OpenAI(api_key=siliconflow_key, base_url="https://api.siliconflow.c
 st.set_page_config(page_title="面试先锋", page_icon="🎙️", layout="wide")
 
 # ==========================================
-# 注入 UI 样式 (删除了对录音组件的魔改)
+# 注入 UI 样式
 # ==========================================
 st.markdown("""
 <style>
@@ -235,7 +235,8 @@ if st.session_state.stage == 'input':
                         for page in doc: extracted_text += page.get_text()
                         
                         if len(extracted_text.strip()) < 50:
-                            with st.spinner("检测到图片型 PDF，启动极速视觉大模型解析... (预计 2-3 秒)"):
+                            # 【修改提示时间】预计 5-8 秒
+                            with st.spinner("检测到图片型 PDF，启动 AI 视觉解析... (预计 5-8 秒)"):
                                 vision_text = parse_image_pdf_with_vision(doc)
                                 if vision_text and len(vision_text.strip()) > 20:
                                     extracted_text = vision_text
@@ -449,7 +450,6 @@ elif st.session_state.stage == 'interview':
             st.session_state.messages.append({"role": "assistant", "content": raw_reply})
             st.rerun()
 
-        # 【恢复原生极简样式】
         if asr_client:
             st.caption("🎙️ **语音输入（点击左侧麦克风图标开始录音，再次点击结束）**")
             audio_value = st.audio_input("Record a voice message", label_visibility="collapsed")
